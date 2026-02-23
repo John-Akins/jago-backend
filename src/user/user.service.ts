@@ -6,6 +6,8 @@ import { User } from './user.entity';
 import { Wallet } from '../wallet/wallet.entity';
 import { SignupDto } from '../dto/signup.dto';
 import { SigninDto } from '../dto/signin.dto';
+import { JwtService } from '@nestjs/jwt'; // Import JwtService
+import { ConfigService } from '@nestjs/config'; // Import ConfigService
 
 @Injectable()
 export class UserService {
@@ -17,10 +19,12 @@ export class UserService {
     private userRepository: Repository<User>,
     @InjectRepository(Wallet)
     private walletRepository: Repository<Wallet>,
+    private jwtService: JwtService, // Inject JwtService
+    private configService: ConfigService, // Inject ConfigService
   ) {}
 
   async signup(signupDto: SignupDto): Promise<{ message: string; userId: string }> {
-    const { email, password, name } = signupDto;
+    const { email, password, name, shortcode } = signupDto;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({ where: { email } });
@@ -28,8 +32,9 @@ export class UserService {
       throw new BadRequestException('User with this email already exists');
     }
 
-    // Hash password
+    // Hash password and shortcode
     const hashedPassword = await bcrypt.hash(password, this.saltRounds);
+    const hashedShortcode = await bcrypt.hash(shortcode, this.saltRounds);
 
     // Create new user
     const newUser = this.userRepository.create({
@@ -37,6 +42,7 @@ export class UserService {
       password: hashedPassword,
       name,
       emailVerified: false,
+      shortcode: hashedShortcode,
     });
 
     const savedUser = await this.userRepository.save(newUser);
@@ -55,7 +61,7 @@ export class UserService {
     };
   }
 
-  async signin(signinDto: SigninDto): Promise<{ message: string; userId: string; email: string }> {
+  async signin(signinDto: SigninDto): Promise<{ message: string; access_token: string }> {
     const { email, password } = signinDto;
 
     // Find user by email
@@ -70,10 +76,13 @@ export class UserService {
       throw new NotFoundException('Invalid email or password');
     }
 
+    // Generate JWT token
+    const payload = { email: user.email, sub: user.id };
+    const access_token = await this.jwtService.signAsync(payload, { secret: this.configService.get<string>('JWT_SECRET') });
+
     return {
       message: 'User signed in successfully',
-      userId: user.id,
-      email: user.email,
+      access_token: access_token,
     };
   }
 

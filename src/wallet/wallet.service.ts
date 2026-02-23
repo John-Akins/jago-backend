@@ -1,10 +1,13 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import * as bcrypt from 'bcrypt';
 import { Wallet } from './wallet.entity';
 import { FundWalletDto } from '../dto/fund-wallet.dto';
 import { PayBillDto } from '../dto/pay-bill.dto';
 import { MockBillerService } from '../external/mock-biller.service';
+import { User } from '../user/user.entity';
+import { UserService } from '../user/user.service';
 
 // Conversion constants for NGN/Kobo
 const KOBO_PER_NAIRA = 100;
@@ -21,6 +24,8 @@ export class WalletService {
     @InjectRepository(Wallet)
     private walletRepository: Repository<Wallet>,
     private mockBillerService: MockBillerService,
+    private userService: UserService, // Inject UserService
+    @InjectRepository(User) private userRepository: Repository<User>, // Inject User Repository to fetch user data
   ) {}
 
   // --- PUBLIC API ---
@@ -28,7 +33,7 @@ export class WalletService {
   async fundWallet(userId: string, dto: FundWalletDto) {
     // Validate amount is positive
     if (dto.amount <= 0) {
-      throw new BadRequestException('amount must be a positive number');
+      throw new BadRequestException("amount must be a positive number");
     }
 
     // Get user's wallet
@@ -43,8 +48,8 @@ export class WalletService {
 
     return {
       transactionId: `txn_fund_${Date.now()}`,
-      status: 'COMPLETED',
-      type: 'FUNDING',
+      status: "COMPLETED",
+      type: "FUNDING",
       userId,
       amount: dto.amount, // Return in Naira for API response
       currency: wallet.currency,
@@ -55,8 +60,20 @@ export class WalletService {
 
   async payBill(userId: string, dto: PayBillDto) {
     // Validate bill type is valid
-    if (!Object.values(['AIRTIME', 'CABLE_TV']).includes(dto.billType)) {
-      throw new BadRequestException('billType must be a valid enum value');
+    if (!Object.values(["AIRTIME", "CABLE_TV"]).includes(dto.billType)) {
+      throw new BadRequestException("billType must be a valid enum value");
+    }
+
+    // Fetch user to verify shortcode
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user || !user.shortcode) {
+      throw new UnauthorizedException("Shortcode not set for this user");
+    }
+
+    // Verify shortcode
+    const isShortcodeValid = await bcrypt.compare(dto.shortcode, user.shortcode);
+    if (!isShortcodeValid) {
+      throw new UnauthorizedException("Invalid shortcode");
     }
 
     // Get user's wallet
@@ -67,7 +84,7 @@ export class WalletService {
 
     // Check if user has sufficient balance (both in kobo)
     if (Number(wallet.balance) < amountInKobo) {
-      throw new BadRequestException('Insufficient wallet balance');
+      throw new BadRequestException("Insufficient wallet balance");
     }
 
     // Deduct from wallet (stored in kobo)
@@ -76,8 +93,8 @@ export class WalletService {
 
     return {
       transactionId: `txn_bill_${Date.now()}`,
-      status: 'COMPLETED',
-      type: 'BILL_PAYMENT',
+      status: "COMPLETED",
+      type: "BILL_PAYMENT",
       userId,
       billType: dto.billType,
       billerCode: dto.billerCode,
@@ -104,14 +121,14 @@ export class WalletService {
   async getTransactionStatus(transactionId: string) {
     // Static response for transaction status
     return {
-      transactionId,
-      status: 'COMPLETED',
-      type: 'FUNDING',
-      userId: 'user123',
+      transactionId: transactionId,
+      status: "COMPLETED",
+      type: "FUNDING",
+      userId: "user123",
       amount: 1000, // In Naira
-      currency: 'NGN',
+      currency: "NGN",
       completedAt: new Date().toISOString(),
-      message: 'Transaction completed successfully'
+      message: "Transaction completed successfully"
     };
   }
 
@@ -120,7 +137,7 @@ export class WalletService {
   private async getWalletByUserId(userId: string): Promise<Wallet> {
     const wallet = await this.walletRepository.findOne({ where: { userId } });
     if (!wallet) {
-      throw new NotFoundException('Wallet not found for user');
+      throw new NotFoundException("Wallet not found for user");
     }
     return wallet;
   }

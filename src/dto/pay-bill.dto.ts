@@ -1,4 +1,4 @@
-import { IsNumber, IsString, IsPositive, IsNotEmpty, IsEnum } from 'class-validator';
+import { IsNumber, IsString, IsPositive, IsNotEmpty, IsEnum, Length, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export enum BillType {
@@ -40,4 +40,15 @@ export class PayBillDto {
   @IsString()
   @IsNotEmpty()
   customerId: string;
+
+  @ApiProperty({
+    description: '4-digit shortcode for transaction verification',
+    example: '1234',
+    minLength: 4,
+    maxLength: 4,
+  })
+  @IsString()
+  @Length(4, 4, { message: 'Shortcode must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: 'Shortcode must be a 4-digit number' })
+  shortcode: string;
 }

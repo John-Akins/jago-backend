@@ -1,4 +1,4 @@
-import { IsEmail, IsString, IsOptional, MinLength, Matches } from 'class-validator';
+import { IsEmail, IsString, IsOptional, MinLength, Matches, Length } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class SignupDto {
@@ -28,4 +28,15 @@ export class SignupDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @ApiProperty({
+    description: '4-digit shortcode for transactions',
+    example: '1234',
+    minLength: 4,
+    maxLength: 4,
+  })
+  @IsString()
+  @Length(4, 4, { message: 'Shortcode must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: 'Shortcode must be a 4-digit number' })
+  shortcode: string;
 }

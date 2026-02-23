@@ -179,6 +179,10 @@ export class KycService {
       throw new BadRequestException('Invalid KYC status');
     }
 
+    if (status === 'REJECTED' && !rejectionReason) {
+      throw new BadRequestException('Rejection reason is required for REJECTED status');
+    }
+
     kyc.status = status;
     if (status === 'REJECTED' && rejectionReason) {
       kyc.rejectionReason = rejectionReason;

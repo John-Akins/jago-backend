@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { WalletModule } from './wallet/wallet.module';
 import { UserModule } from './user/user.module';
 import { KycModule } from './kyc/kyc.module';
+import { AuthModule } from './auth/auth.module'; // Import AuthModule
 import { DatabaseConfigService } from './config/database.config';
 
 @Module({
@@ -17,6 +18,7 @@ import { DatabaseConfigService } from './config/database.config';
     WalletModule,
     UserModule,
     KycModule,
+    AuthModule, // Add AuthModule to imports
   ],
   controllers: [],
   providers: [],

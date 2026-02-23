@@ -28,6 +28,10 @@ export class User {
   @ApiProperty({ description: 'Whether the user email is verified', example: false, default: false })
   emailVerified: boolean;
 
+  @Column({ nullable: true })
+  @ApiProperty({ description: '4-digit shortcode for transactions (hashed)', example: 'hashed_shortcode_here', required: false })
+  shortcode?: string;
+
   @CreateDateColumn()
   @ApiProperty({ description: 'User creation timestamp' })
   createdAt: Date;
