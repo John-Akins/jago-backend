@@ -13,10 +13,16 @@ import { DatabaseConfigService } from '../src/config/database.config';
 import { AuthModule } from '../src/auth/auth.module';
 import { UserService } from '../src/user/user.service';
 import { JwtService } from '@nestjs/jwt';
+import { MockSqsService } from '../src/external/mock-sqs.service';
+import { MockNotificationService } from '../src/external/mock-notification.service';
+import { SqsWorkerService } from '../src/external/sqs-worker.service';
 import * as bcrypt from 'bcrypt';
 
 const KOBO_PER_NAIRA = 100;
 const nairaToKobo = (naira: number): number => Math.round(naira * KOBO_PER_NAIRA);
+
+// Helper to wait for worker to process messages
+const waitForWorker = (ms: number = 3000) => new Promise(resolve => setTimeout(resolve, ms));
 
 describe('Wallet API (e2e)', () => {
   let app: INestApplication;
@@ -26,6 +32,8 @@ describe('Wallet API (e2e)', () => {
   let userService: UserService;
   let jwtService: JwtService;
   let configService: ConfigService;
+  let sqsWorkerService: SqsWorkerService;
+  let mockSqsService: MockSqsService;
 
   const saltRounds = 10;
 
@@ -53,6 +61,8 @@ describe('Wallet API (e2e)', () => {
     userService = moduleFixture.get<UserService>(UserService);
     jwtService = moduleFixture.get<JwtService>(JwtService);
     configService = moduleFixture.get<ConfigService>(ConfigService);
+    sqsWorkerService = moduleFixture.get<SqsWorkerService>(SqsWorkerService);
+    mockSqsService = moduleFixture.get<MockSqsService>(MockSqsService);
     
     const config = new DocumentBuilder()
       .setTitle('Jago Wallet API')
@@ -70,9 +80,15 @@ describe('Wallet API (e2e)', () => {
   afterEach(async () => {
     if (walletRepository) { await walletRepository.clear(); }
     if (userRepository) { await userRepository.clear(); }
+    // Clear SQS queue
+    if (mockSqsService) { await mockSqsService.clearQueue(); }
   });
 
   afterAll(async () => {
+    // Stop the background worker before closing the app
+    if (sqsWorkerService) { 
+      sqsWorkerService.stopWorker(); 
+    }
     if (app) { await app.close(); }
   });
 
@@ -155,7 +171,7 @@ describe('Wallet API (e2e)', () => {
   });
 
   describe('POST /wallet/:userId/pay-bill', () => {
-    it('should pay a bill successfully with correct shortcode', async () => {
+    it('should enqueue bill payment and return PENDING status', async () => {
       const { user, accessToken } = await createUserAndWallet(5000, 'NGN', '1234');
 
       const response = await request(app.getHttpServer())
@@ -171,18 +187,18 @@ describe('Wallet API (e2e)', () => {
         .expect(201);
 
       expect(response.body).toMatchObject({
-        status: 'COMPLETED',
+        status: 'PENDING',
         type: 'BILL_PAYMENT',
         userId: user.id,
         billType: 'AIRTIME',
         billerCode: 'AIRTEL',
         customerId: '08012345678',
         amount: 500,
-        message: 'Successfully paid AIRTIME bill for customer 08012345678'
       });
       expect(response.body.transactionId).toBeDefined();
-      expect(response.body.completedAt).toBeDefined();
+      expect(response.body.message).toContain('Bill payment request received');
 
+      // Wallet should be deducted immediately
       const updatedWallet = await walletRepository.findOne({ where: { userId: user.id } });
       expect(Number(updatedWallet.balance)).toBe(nairaToKobo(4500));
     });
@@ -313,7 +329,7 @@ describe('Wallet API (e2e)', () => {
   });
 
   describe('GET /wallet/transactions/:transactionId/status', () => {
-    it('should get transaction status', async () => {
+    it('should get transaction status for funding transaction', async () => {
       const { accessToken } = await createUserAndWallet(5000, 'NGN', '1234');
       
       const response = await request(app.getHttpServer())
@@ -331,6 +347,120 @@ describe('Wallet API (e2e)', () => {
         message: 'Transaction completed successfully'
       });
       expect(response.body.completedAt).toBeDefined();
+    });
+  });
+
+  describe('POST /wallet/:userId/pay-bill - SQS Integration (Background Worker)', () => {
+    it('should process bill payment via background worker and update status to SUCCESS', async () => {
+      const { user, accessToken } = await createUserAndWallet(10000, 'NGN', '1234');
+
+      // Enqueue bill payment
+      const response = await request(app.getHttpServer())
+        .post(`/wallet/${user.id}/pay-bill`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({
+          billType: 'AIRTIME',
+          billerCode: 'MTN',
+          customerId: '08098765432',
+          amount: 1000,
+          shortcode: '1234',
+        })
+        .expect(201);
+
+      const transactionId = response.body.transactionId;
+      expect(response.body.status).toBe('PENDING');
+
+      // Wallet should be deducted immediately
+      let wallet = await walletRepository.findOne({ where: { userId: user.id } });
+      expect(Number(wallet.balance)).toBe(nairaToKobo(9000));
+
+      // Wait for background worker to process
+      await waitForWorker(3000);
+
+      // Check transaction status - should be SUCCESS now
+      const statusResponse = await request(app.getHttpServer())
+        .get(`/wallet/transactions/${transactionId}/status`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+
+      expect(statusResponse.body.status).toBe('SUCCESS');
+      expect(statusResponse.body.providerTxnId).toBeDefined();
+    });
+
+    it('should reverse wallet deduction when bill payment fails (amount 9999)', async () => {
+      const { user, accessToken } = await createUserAndWallet(15000, 'NGN', '1234');
+      const initialBalance = 15000;
+
+      // Enqueue bill payment with failure-triggering amount
+      const response = await request(app.getHttpServer())
+        .post(`/wallet/${user.id}/pay-bill`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({
+          billType: 'CABLE_TV',
+          billerCode: 'DSTV',
+          customerId: '1234567890',
+          amount: 9999, // This triggers a simulated failure
+          shortcode: '1234',
+        })
+        .expect(201);
+
+      const transactionId = response.body.transactionId;
+      expect(response.body.status).toBe('PENDING');
+
+      // Wallet should be deducted immediately
+      let wallet = await walletRepository.findOne({ where: { userId: user.id } });
+      expect(Number(wallet.balance)).toBe(nairaToKobo(initialBalance - 9999));
+
+      // Wait for background worker to process
+      await waitForWorker(3000);
+
+      // Wallet balance should be restored (reversed)
+      wallet = await walletRepository.findOne({ where: { userId: user.id } });
+      expect(Number(wallet.balance)).toBe(nairaToKobo(initialBalance));
+
+      // Check transaction status - should be FAILURE
+      const statusResponse = await request(app.getHttpServer())
+        .get(`/wallet/transactions/${transactionId}/status`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+
+      expect(statusResponse.body.status).toBe('FAILURE');
+      expect(statusResponse.body.errorMessage).toContain('External provider rejected the transaction');
+    });
+
+    it('should process CABLE_TV bill payment successfully', async () => {
+      const { user, accessToken } = await createUserAndWallet(10000, 'NGN', '1234');
+
+      // Enqueue bill payment
+      const response = await request(app.getHttpServer())
+        .post(`/wallet/${user.id}/pay-bill`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({
+          billType: 'CABLE_TV',
+          billerCode: 'DSTV',
+          customerId: '1234567890',
+          amount: 2500,
+          shortcode: '1234',
+        })
+        .expect(201);
+
+      const transactionId = response.body.transactionId;
+      expect(response.body.status).toBe('PENDING');
+
+      // Wait for background worker to process
+      await waitForWorker(3000);
+
+      // Check transaction status
+      const statusResponse = await request(app.getHttpServer())
+        .get(`/wallet/transactions/${transactionId}/status`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+
+      expect(statusResponse.body.status).toBe('SUCCESS');
+
+      // Verify wallet balance
+      const wallet = await walletRepository.findOne({ where: { userId: user.id } });
+      expect(Number(wallet.balance)).toBe(nairaToKobo(7500));
     });
   });
 

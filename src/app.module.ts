@@ -5,6 +5,7 @@ import { WalletModule } from './wallet/wallet.module';
 import { UserModule } from './user/user.module';
 import { KycModule } from './kyc/kyc.module';
 import { AuthModule } from './auth/auth.module'; // Import AuthModule
+import { NotificationModule } from './notification/notification.module';
 import { DatabaseConfigService } from './config/database.config';
 
 @Module({
@@ -19,6 +20,7 @@ import { DatabaseConfigService } from './config/database.config';
     UserModule,
     KycModule,
     AuthModule, // Add AuthModule to imports
+    NotificationModule,
   ],
   controllers: [],
   providers: [],

@@ -1,5 +1,5 @@
 import { Controller, Post, Get, Put, Body, Param, Query, UseGuards, Req, UnauthorizedException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody, ApiQuery, ApiBearerAuth } from '@nestjs/swagger';
 import { KycService } from './kyc.service';
 import { KycDto } from '../dto/kyc.dto';
 import { Kyc } from './kyc.entity';
@@ -7,6 +7,7 @@ import { IdentificationType } from '../dto/kyc.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard'; // Import JwtAuthGuard
 
 @ApiTags('kyc')
+@ApiBearerAuth()
 @Controller('kyc')
 export class KycController {
   constructor(private readonly kycService: KycService) {}

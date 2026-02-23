@@ -25,7 +25,8 @@ export class MockBillerService {
     await this.simulateDelay();
 
     // Mock transaction rejection using static value
-    if (amount === 999) {
+    // Amount of 9999 triggers a simulated failure for testing
+    if (amount === 9999) {
       throw new Error('External provider rejected the transaction');
     }
 

@@ -1,13 +1,14 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, UnauthorizedException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { Wallet } from './wallet.entity';
 import { FundWalletDto } from '../dto/fund-wallet.dto';
 import { PayBillDto } from '../dto/pay-bill.dto';
-import { MockBillerService } from '../external/mock-biller.service';
+import { MockSqsService, BillPaymentMessage, SqsMessageRecord } from '../external/mock-sqs.service';
+import { MockNotificationService } from '../external/mock-notification.service';
+import { SqsWorkerService, PaymentResultHandler } from '../external/sqs-worker.service';
 import { User } from '../user/user.entity';
-import { UserService } from '../user/user.service';
 
 // Conversion constants for NGN/Kobo
 const KOBO_PER_NAIRA = 100;
@@ -17,16 +18,25 @@ const nairaToKobo = (naira: number): number => Math.round(naira * KOBO_PER_NAIRA
 const koboToNaira = (kobo: number): number => kobo / KOBO_PER_NAIRA;
 
 @Injectable()
-export class WalletService {
+export class WalletService implements PaymentResultHandler, OnModuleInit {
   private readonly logger = new Logger(WalletService.name);
 
   constructor(
     @InjectRepository(Wallet)
     private walletRepository: Repository<Wallet>,
-    private mockBillerService: MockBillerService,
-    private userService: UserService, // Inject UserService
-    @InjectRepository(User) private userRepository: Repository<User>, // Inject User Repository to fetch user data
+    private mockSqsService: MockSqsService,
+    private mockNotificationService: MockNotificationService,
+    private sqsWorkerService: SqsWorkerService,
+    @InjectRepository(User) private userRepository: Repository<User>,
   ) {}
+
+  /**
+   * Register this service as the payment result handler when module initializes.
+   */
+  onModuleInit() {
+    this.sqsWorkerService.setPaymentResultHandler(this);
+    this.logger.log('WalletService registered as payment result handler');
+  }
 
   // --- PUBLIC API ---
 
@@ -58,6 +68,18 @@ export class WalletService {
     };
   }
 
+  /**
+   * Pay a bill using event-driven processing via SQS mock.
+   * Flow:
+   * 1. Deduct the bill amount from the user's wallet
+   * 2. Send a message to the mocked SQS queue (status: PENDING)
+   * 3. Return immediately with PENDING status
+   * 
+   * Background worker will:
+   * - Process the message and call the biller API
+   * - On success: Send success notification
+   * - On failure: Reverse the wallet deduction and send notifications
+   */
   async payBill(userId: string, dto: PayBillDto) {
     // Validate bill type is valid
     if (!Object.values(["AIRTIME", "CABLE_TV"]).includes(dto.billType)) {
@@ -87,22 +109,91 @@ export class WalletService {
       throw new BadRequestException("Insufficient wallet balance");
     }
 
-    // Deduct from wallet (stored in kobo)
+    // Generate transaction ID
+    const transactionId = `txn_bill_${Date.now()}`;
+
+    // Step 1: Deduct from wallet (stored in kobo)
     wallet.balance = Number(wallet.balance) - amountInKobo;
     await this.walletRepository.save(wallet);
 
+    this.logger.log(`Deducted ${dto.amount} NGN from wallet for user ${userId}. Transaction: ${transactionId}`);
+
+    // Step 2: Create SQS message for bill payment processing
+    const sqsMessage: BillPaymentMessage = {
+      transactionId,
+      userId,
+      billType: dto.billType,
+      billerCode: dto.billerCode,
+      customerId: dto.customerId,
+      amount: dto.amount,
+      amountInKobo,
+      createdAt: new Date(),
+    };
+
+    // Step 3: Send message to SQS queue (status: PENDING)
+    await this.mockSqsService.sendMessage(sqsMessage);
+    this.logger.log(`Bill payment message enqueued for transaction: ${transactionId}`);
+
+    // Return immediately with PENDING status
     return {
-      transactionId: `txn_bill_${Date.now()}`,
-      status: "COMPLETED",
+      transactionId,
+      status: "PENDING",
       type: "BILL_PAYMENT",
       userId,
       billType: dto.billType,
       billerCode: dto.billerCode,
       customerId: dto.customerId,
-      amount: dto.amount, // Return in Naira for API response
-      completedAt: new Date().toISOString(),
-      message: `Successfully paid ${dto.billType} bill for customer ${dto.customerId}`
+      amount: dto.amount,
+      createdAt: new Date().toISOString(),
+      message: `Bill payment request received and is being processed. Transaction ID: ${transactionId}`,
     };
+  }
+
+  /**
+   * Handle payment result from the background worker.
+   * This is called by SqsWorkerService after processing a message.
+   * On failure, it reverses the wallet deduction and sends a reversal notification.
+   */
+  async handlePaymentResult(message: SqsMessageRecord, result: { success: boolean; error?: string }): Promise<void> {
+    this.logger.log(`Handling payment result for transaction ${message.transactionId}: ${result.success ? 'SUCCESS' : 'FAILURE'}`);
+    
+    if (!result.success) {
+      // Reverse the wallet deduction
+      await this.reverseWalletDeduction(
+        message.userId,
+        message.amountInKobo,
+        message.transactionId,
+        result.error || 'Unknown error',
+      );
+      
+      // Send reversal processed notification
+      await this.mockNotificationService.notifyWalletReversalProcessed(
+        message.userId,
+        message.transactionId,
+        message.amount,
+        result.error || 'Unknown error',
+      );
+      this.logger.log(`Reversal processed notification sent for transaction: ${message.transactionId}`);
+    }
+  }
+
+  /**
+   * Reverse a wallet deduction (used when bill payment fails).
+   * This ensures the user's balance is restored after a failed transaction.
+   */
+  private async reverseWalletDeduction(
+    userId: string,
+    amountInKobo: number,
+    transactionId: string,
+    reason: string,
+  ): Promise<void> {
+    this.logger.log(`Reversing wallet deduction for user ${userId}. Amount: ${koboToNaira(amountInKobo)} NGN`);
+    
+    const wallet = await this.getWalletByUserId(userId);
+    wallet.balance = Number(wallet.balance) + amountInKobo;
+    await this.walletRepository.save(wallet);
+    
+    this.logger.log(`Wallet reversal completed for transaction ${transactionId}. Reason: ${reason}`);
   }
 
   // --- GETTERS ---
@@ -119,7 +210,30 @@ export class WalletService {
   }
 
   async getTransactionStatus(transactionId: string) {
-    // Static response for transaction status
+    // Check if we have this transaction in SQS
+    const sqsMessage = await this.mockSqsService.getMessageByTransactionId(transactionId);
+    
+    if (sqsMessage) {
+      return {
+        transactionId: transactionId,
+        status: sqsMessage.status,
+        type: "BILL_PAYMENT",
+        userId: sqsMessage.userId,
+        billType: sqsMessage.billType,
+        amount: sqsMessage.amount,
+        currency: "NGN",
+        providerTxnId: sqsMessage.providerTxnId,
+        errorMessage: sqsMessage.errorMessage,
+        completedAt: sqsMessage.updatedAt.toISOString(),
+        message: sqsMessage.status === 'SUCCESS' 
+          ? 'Transaction completed successfully'
+          : sqsMessage.status === 'FAILURE'
+            ? `Transaction failed: ${sqsMessage.errorMessage}`
+            : 'Transaction is being processed',
+      };
+    }
+    
+    // Static response for other transactions (e.g., funding)
     return {
       transactionId: transactionId,
       status: "COMPLETED",
