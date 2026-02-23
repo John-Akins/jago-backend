@@ -13,9 +13,11 @@ async function bootstrap() {
     .setTitle('Jago Wallet API')
     .setDescription('A simple wallet service API with static responses for testing')
     .setVersion('1.0')
+    .addBearerAuth()    
     .addTag('user')
     .addTag('kyc')
     .addTag('wallet')
+    .addTag('notifications')
     .build();
   
   const document = SwaggerModule.createDocument(app, config);

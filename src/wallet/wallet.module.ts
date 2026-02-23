@@ -1,19 +1,20 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WalletController } from './wallet.controller';
 import { WalletService } from './wallet.service';
-import { MockBillerService } from '../external/mock-biller.service';
+import { ExternalServicesModule } from '../external/external-services.module';
 import { Wallet } from './wallet.entity';
 import { User } from '../user/user.entity';
-import { UserModule } from '../user/user.module'; // Import UserModule
+import { UserModule } from '../user/user.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Wallet, User]),
-    UserModule, // Import UserModule here
+    UserModule,
+    ExternalServicesModule,
   ],
   controllers: [WalletController],
-  providers: [WalletService, MockBillerService],
+  providers: [WalletService],
   exports: [WalletService],
 })
 export class WalletModule {}

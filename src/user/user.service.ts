@@ -61,7 +61,7 @@ export class UserService {
     };
   }
 
-  async signin(signinDto: SigninDto): Promise<{ message: string; access_token: string }> {
+  async signin(signinDto: SigninDto): Promise<{ message: string; access_token: string, user_id: string }> {
     const { email, password } = signinDto;
 
     // Find user by email
@@ -83,6 +83,7 @@ export class UserService {
     return {
       message: 'User signed in successfully',
       access_token: access_token,
+      user_id: user.id
     };
   }
 
