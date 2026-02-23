@@ -12,10 +12,10 @@ export class DatabaseConfigService implements TypeOrmOptionsFactory {
   createTypeOrmOptions(): TypeOrmModuleOptions {
     const environment = this.configService.get<string>('NODE_ENV');
 
-    const db_sync = !(environment === 'production');
+    const isSyncedEnv = !(environment === 'production');
     const commonOptions = {
       entities: [User, Kyc, Wallet],
-      synchronize: db_sync, // Should be false in production
+      synchronize: isSyncedEnv, // Should be false in production
       logging: false,
     };
 
