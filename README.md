@@ -36,7 +36,12 @@ npm install
 
 ### 3. Configure Environment
 
-Create a `.env` file (if required) and set up any necessary environment variables (e.g., JWT secret).
+Create a `.env` file in the project root with the following content:
+
+```
+PORT=3000
+JWT_SECRET=superSecretKey
+```
 
 ### 4. Run Database Migrations (if needed)
 
